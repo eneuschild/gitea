@@ -322,27 +322,9 @@ var issueReposQueryPattern = regexp.MustCompile(`^\[\d+(,\d+)*,?\]$`)
 
 // Issues render the user issues page
 func Issues(ctx *context.Context) {
-	isPullList := ctx.Params(":type") == "pulls"
-	unitType := models.UnitTypeIssues
-	if isPullList {
-		if models.UnitTypePullRequests.UnitGlobalDisabled() {
-			log.Debug("Pull request overview page not available as it is globally disabled.")
-			ctx.Status(404)
-			return
-		}
-
-		ctx.Data["Title"] = ctx.Tr("pull_requests")
-		ctx.Data["PageIsPulls"] = true
-		unitType = models.UnitTypePullRequests
-	} else {
-		if models.UnitTypeIssues.UnitGlobalDisabled() {
-			log.Debug("Issues overview page not available as it is globally disabled.")
-			ctx.Status(404)
-			return
-		}
-
-		ctx.Data["Title"] = ctx.Tr("issues")
-		ctx.Data["PageIsIssues"] = true
+	isPullList, unitType, disabled := handlePullsAndCheckIfDisabled(ctx)
+	if disabled {
+		return
 	}
 
 	ctxUser := getDashboardContextUser(ctx)
@@ -350,55 +332,10 @@ func Issues(ctx *context.Context) {
 		return
 	}
 
-	// Organization does not have view type and filter mode.
-	var (
-		viewType   string
-		sortType   = ctx.Query("sort")
-		filterMode = models.FilterModeAll
-	)
-
-	if ctxUser.IsOrganization() {
-		viewType = "your_repositories"
-	} else {
-		viewType = ctx.Query("type")
-		switch viewType {
-		case "assigned":
-			filterMode = models.FilterModeAssign
-		case "created_by":
-			filterMode = models.FilterModeCreate
-		case "mentioned":
-			filterMode = models.FilterModeMention
-		case "your_repositories": // filterMode already set to All
-		default:
-			viewType = "your_repositories"
-		}
-	}
-
-	page := ctx.QueryInt("page")
-	if page <= 1 {
-		page = 1
-	}
+	filterMode := handleViewTypeAndDetermineFilterMode(ctxUser, ctx)
 
 	reposQuery := ctx.Query("repos")
-	var repoIDs []int64
-	if len(reposQuery) != 0 {
-		if issueReposQueryPattern.MatchString(reposQuery) {
-			// remove "[" and "]" from string
-			reposQuery = reposQuery[1 : len(reposQuery)-1]
-			//for each ID (delimiter ",") add to int to repoIDs
-			for _, rID := range strings.Split(reposQuery, ",") {
-				// Ensure nonempty string entries
-				if rID != "" && rID != "0" {
-					rIDint64, err := strconv.ParseInt(rID, 10, 64)
-					if err == nil {
-						repoIDs = append(repoIDs, rIDint64)
-					}
-				}
-			}
-		} else {
-			log.Warn("issueReposQueryPattern not match with query")
-		}
-	}
+	repoIDs := getRepoIDsByQuery(reposQuery)
 
 	isShowClosed := ctx.Query("state") == "closed"
 
@@ -432,6 +369,7 @@ func Issues(ctx *context.Context) {
 		userRepoIDs = []int64{-1}
 	}
 
+	sortType := ctx.Query("sort")
 	opts := &models.IssuesOptions{
 		IsPull:   util.OptionalBoolOf(isPullList),
 		SortType: sortType,
@@ -483,6 +421,10 @@ func Issues(ctx *context.Context) {
 		}
 	}
 
+	page := ctx.QueryInt("page")
+	if page <= 1 {
+		page = 1
+	}
 	opts.Page = page
 	opts.PageSize = setting.UI.IssuePagingNum
 	var labelIDs []int64
@@ -654,7 +596,6 @@ func Issues(ctx *context.Context) {
 	ctx.Data["Counts"] = counts
 	ctx.Data["IssueStats"] = userIssueStats
 	ctx.Data["ShownIssueStats"] = shownIssueStats
-	ctx.Data["ViewType"] = viewType
 	ctx.Data["SortType"] = sortType
 	ctx.Data["RepoIDs"] = repoIDs
 	ctx.Data["IsShowClosed"] = isShowClosed
@@ -683,6 +624,81 @@ func Issues(ctx *context.Context) {
 	ctx.Data["Page"] = pager
 
 	ctx.HTML(200, tplIssues)
+}
+
+func handleViewTypeAndDetermineFilterMode(ctxUser *models.User, ctx *context.Context) int {
+
+	// Organization does not have view type and filter mode.
+	filterMode := models.FilterModeAll
+	var viewType string
+	if ctxUser.IsOrganization() {
+		viewType = "your_repositories"
+	} else {
+		viewType = ctx.Query("type")
+		switch viewType {
+		case "assigned":
+			filterMode = models.FilterModeAssign
+		case "created_by":
+			filterMode = models.FilterModeCreate
+		case "mentioned":
+			filterMode = models.FilterModeMention
+		case "your_repositories":
+		default:
+			viewType = "your_repositories"
+		}
+	}
+	ctx.Data["ViewType"] = viewType
+	return filterMode
+}
+
+func handlePullsAndCheckIfDisabled(ctx *context.Context) (bool, models.UnitType, bool) {
+	isPullList := ctx.Params(":type") == "pulls"
+	unitType := models.UnitTypeIssues
+	if isPullList {
+		if models.UnitTypePullRequests.UnitGlobalDisabled() {
+			log.Debug("Pull request overview page not available as it is globally disabled.")
+			ctx.Status(404)
+			return false, 0, true
+		}
+
+		ctx.Data["Title"] = ctx.Tr("pull_requests")
+		ctx.Data["PageIsPulls"] = true
+		unitType = models.UnitTypePullRequests
+	} else {
+		if models.UnitTypeIssues.UnitGlobalDisabled() {
+			log.Debug("Issues overview page not available as it is globally disabled.")
+			ctx.Status(404)
+			return false, 0, true
+		}
+
+		ctx.Data["Title"] = ctx.Tr("issues")
+		ctx.Data["PageIsIssues"] = true
+	}
+	return isPullList, unitType, false
+}
+
+func getRepoIDsByQuery(reposQuery string) []int64 {
+	var repoIDs []int64
+
+	if len(reposQuery) != 0 {
+		if issueReposQueryPattern.MatchString(reposQuery) {
+			// remove "[" and "]" from string
+			reposQuery = reposQuery[1 : len(reposQuery)-1]
+			//for each ID (delimiter ",") add to int to repoIDs
+			for _, rID := range strings.Split(reposQuery, ",") {
+				// Ensure nonempty string entries
+				if rID != "" && rID != "0" {
+					rIDint64, err := strconv.ParseInt(rID, 10, 64)
+					if err == nil {
+						repoIDs = append(repoIDs, rIDint64)
+					}
+				}
+			}
+		} else {
+			log.Warn("query does not match issueReposQueryPattern")
+		}
+	}
+	return repoIDs
 }
 
 // ShowSSHKeys output all the ssh keys of user by uid
